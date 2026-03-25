@@ -2,36 +2,10 @@
 import Hyperswarm from 'hyperswarm'
 import crypto from 'hypercore-id-encoding'
 
-// ── P2P connection (kept from Phase 1, will be wired in Phase 2) ──────────
-const swarm = new Hyperswarm()
-Pear.teardown(() => swarm.destroy())
-
-const topic = crypto.decode('70656172706f6e67746573743130313030303030303030303030303030303030')
-swarm.join(topic, { client: true, server: true })
-
-let peer = null
-
-swarm.on('connection', (conn) => {
-  peer = conn
-  const id = crypto.encode(conn.remotePublicKey).slice(0, 6)
-  statusEl.innerText = `Connected to Peer: ${id}`
-  statusEl.style.background = '#2e7d32'
-
-  conn.on('data', (data) => {
-    // Phase 2 will handle incoming game state here
-    console.log(`Received from ${id}:`, data.toString())
-  })
-
-  conn.on('close', () => {
-    peer = null
-    statusEl.innerText = 'Peer disconnected — local mode'
-    statusEl.style.background = '#222'
-  })
-})
-
 // ── DOM refs ──────────────────────────────────────────────────────────────
 const statusEl = document.getElementById('status')
 const scoreEl = document.getElementById('score')
+const controlsEl = document.getElementById('controls')
 const canvas = document.getElementById('game')
 const ctx = canvas.getContext('2d')
 
@@ -44,6 +18,22 @@ const BALL_SIZE = 8
 const PADDLE_SPEED = 6
 const BALL_SPEED_INIT = 5
 const WINNING_SCORE = 5
+const NET_TICK_MS = 16 // ~60 Hz network sync rate
+
+// ── Roles ─────────────────────────────────────────────────────────────────
+// The first peer (no connection yet) becomes HOST and controls the left
+// paddle + ball physics.  The second peer becomes GUEST and controls the
+// right paddle.  The host is the single source of truth: it runs the
+// simulation and broadcasts the full game state every tick.  The guest
+// only sends its paddle-y position.
+//
+// Message types (JSON over the Hyperswarm encrypted stream):
+//   host  -> guest : { t:'state', left, right, ball, running, over }
+//   guest -> host  : { t:'input', y: <number> }
+//   either         : { t:'serve' }  |  { t:'reset' }
+// ──────────────────────────────────────────────────────────────────────────
+let role = 'host' // default until a peer connects
+let peer = null
 
 // ── Game state ────────────────────────────────────────────────────────────
 const state = {
@@ -58,29 +48,120 @@ const state = {
 const keys = {}
 document.addEventListener('keydown', (e) => {
   keys[e.key] = true
-  if (e.key === ' ' && !state.running && !state.over) serve()
-  if (e.key === ' ' && state.over) resetGame()
+
+  if (e.key === ' ') {
+    if (state.over) {
+      if (role === 'host') {
+        resetGame()
+      } else {
+        send({ t: 'reset' })
+      }
+    } else if (!state.running) {
+      if (role === 'host') {
+        serve()
+      } else {
+        send({ t: 'serve' })
+      }
+    }
+  }
 })
 document.addEventListener('keyup', (e) => { keys[e.key] = false })
 
-// ── Serve the ball ────────────────────────────────────────────────────────
+// ── Networking helpers ────────────────────────────────────────────────────
+function send (obj) {
+  if (peer && !peer.destroyed) {
+    peer.write(JSON.stringify(obj))
+  }
+}
+
+function onData (buf) {
+  let msg
+  try { msg = JSON.parse(buf.toString()) } catch { return }
+
+  if (role === 'host') {
+    // Host receives guest input
+    if (msg.t === 'input') {
+      state.right.y = msg.y
+    } else if (msg.t === 'serve' && !state.running && !state.over) {
+      serve()
+    } else if (msg.t === 'reset' && state.over) {
+      resetGame()
+    }
+  } else {
+    // Guest receives authoritative state from host
+    // NOTE: we do NOT overwrite state.right.y here because the guest
+    // controls its own paddle locally. Overwriting it would cause the
+    // paddle to "snap back" due to network latency.
+    if (msg.t === 'state') {
+      state.left.y = msg.left.y
+      state.left.score = msg.left.score
+      state.right.score = msg.right.score
+      state.ball = msg.ball
+      state.running = msg.running
+      state.over = msg.over
+    }
+  }
+}
+
+// ── P2P connection via Hyperswarm ─────────────────────────────────────────
+const swarm = new Hyperswarm()
+Pear.teardown(() => swarm.destroy())
+
+const topic = crypto.decode('70656172706f6e67746573743130313030303030303030303030303030303030')
+swarm.join(topic, { client: true, server: true })
+
+swarm.on('connection', (conn) => {
+  // If we already have a peer, ignore additional connections
+  if (peer) { conn.destroy(); return }
+
+  peer = conn
+  const id = crypto.encode(conn.remotePublicKey).slice(0, 6)
+
+  // Role assignment: the peer whose public key is "smaller" hosts.
+  // This is deterministic — both sides compute the same result.
+  const myKey = crypto.encode(swarm.keyPair.publicKey)
+  const theirKey = crypto.encode(conn.remotePublicKey)
+  role = myKey < theirKey ? 'host' : 'guest'
+
+  const side = role === 'host' ? 'LEFT' : 'RIGHT'
+  statusEl.innerText = `Connected to ${id} — you are ${side} paddle`
+  statusEl.style.background = '#2e7d32'
+  controlsEl.textContent = role === 'host'
+    ? 'You: W / S  ·  Space: serve'
+    : 'You: W / S  ·  Space: serve'
+
+  conn.on('data', onData)
+
+  conn.on('close', () => {
+    peer = null
+    role = 'host'
+    statusEl.innerText = 'Peer disconnected — waiting for player...'
+    statusEl.style.background = '#222'
+    controlsEl.textContent = 'Waiting for opponent...'
+    resetGame()
+  })
+
+  conn.on('error', () => { /* handled by close */ })
+})
+
+// ── Serve the ball (host only) ────────────────────────────────────────────
 function serve () {
   state.running = true
-  const angle = (Math.random() * Math.PI / 4) - Math.PI / 8 // slight random angle
+  const angle = (Math.random() * Math.PI / 4) - Math.PI / 8
   const dir = Math.random() < 0.5 ? 1 : -1
   state.ball.vx = dir * BALL_SPEED_INIT * Math.cos(angle)
   state.ball.vy = BALL_SPEED_INIT * Math.sin(angle)
   statusEl.innerText = 'Game on!'
 }
 
-// ── Reset after a point ───────────────────────────────────────────────────
+// ── Reset ─────────────────────────────────────────────────────────────────
 function resetBall () {
   state.ball.x = W / 2
   state.ball.y = H / 2
   state.ball.vx = 0
   state.ball.vy = 0
   state.running = false
-  statusEl.innerText = 'Press Space to serve'
+  statusEl.innerText = peer ? 'Press Space to serve' : 'Waiting for player...'
 }
 
 function resetGame () {
@@ -90,62 +171,66 @@ function resetGame () {
   resetBall()
 }
 
-// ── Update logic (called every frame) ─────────────────────────────────────
+// ── Update logic (host runs simulation, guest sends input) ────────────────
 function update () {
-  // Paddle movement
-  if (keys['w'] || keys['W']) state.left.y = Math.max(0, state.left.y - PADDLE_SPEED)
-  if (keys['s'] || keys['S']) state.left.y = Math.min(H - PADDLE_H, state.left.y + PADDLE_SPEED)
-  if (keys['ArrowUp'])        state.right.y = Math.max(0, state.right.y - PADDLE_SPEED)
-  if (keys['ArrowDown'])      state.right.y = Math.min(H - PADDLE_H, state.right.y + PADDLE_SPEED)
+  if (role === 'host') {
+    // Host moves its own (left) paddle from local keys
+    if (keys['w'] || keys['W']) state.left.y = Math.max(0, state.left.y - PADDLE_SPEED)
+    if (keys['s'] || keys['S']) state.left.y = Math.min(H - PADDLE_H, state.left.y + PADDLE_SPEED)
 
-  if (!state.running) return
+    if (!state.running) return
 
-  const ball = state.ball
+    const ball = state.ball
 
-  // Move ball
-  ball.x += ball.vx
-  ball.y += ball.vy
+    // Move ball
+    ball.x += ball.vx
+    ball.y += ball.vy
 
-  // Top / bottom bounce
-  if (ball.y - BALL_SIZE / 2 <= 0 || ball.y + BALL_SIZE / 2 >= H) {
-    ball.vy *= -1
-    ball.y = Math.max(BALL_SIZE / 2, Math.min(H - BALL_SIZE / 2, ball.y))
-  }
+    // Top / bottom bounce
+    if (ball.y - BALL_SIZE / 2 <= 0 || ball.y + BALL_SIZE / 2 >= H) {
+      ball.vy *= -1
+      ball.y = Math.max(BALL_SIZE / 2, Math.min(H - BALL_SIZE / 2, ball.y))
+    }
 
-  // Left paddle collision
-  if (
-    ball.vx < 0 &&
-    ball.x - BALL_SIZE / 2 <= PADDLE_W + 10 &&
-    ball.y >= state.left.y &&
-    ball.y <= state.left.y + PADDLE_H
-  ) {
-    ball.vx = Math.abs(ball.vx) * 1.05 // slight speed-up each hit
-    ball.x = PADDLE_W + 10 + BALL_SIZE / 2
-    // Add spin based on where the ball hit the paddle
-    const hitPos = (ball.y - state.left.y) / PADDLE_H - 0.5
-    ball.vy += hitPos * 3
-  }
+    // Left paddle collision
+    if (
+      ball.vx < 0 &&
+      ball.x - BALL_SIZE / 2 <= PADDLE_W + 10 &&
+      ball.y >= state.left.y &&
+      ball.y <= state.left.y + PADDLE_H
+    ) {
+      ball.vx = Math.abs(ball.vx) * 1.05
+      ball.x = PADDLE_W + 10 + BALL_SIZE / 2
+      const hitPos = (ball.y - state.left.y) / PADDLE_H - 0.5
+      ball.vy += hitPos * 3
+    }
 
-  // Right paddle collision
-  if (
-    ball.vx > 0 &&
-    ball.x + BALL_SIZE / 2 >= W - PADDLE_W - 10 &&
-    ball.y >= state.right.y &&
-    ball.y <= state.right.y + PADDLE_H
-  ) {
-    ball.vx = -Math.abs(ball.vx) * 1.05
-    ball.x = W - PADDLE_W - 10 - BALL_SIZE / 2
-    const hitPos = (ball.y - state.right.y) / PADDLE_H - 0.5
-    ball.vy += hitPos * 3
-  }
+    // Right paddle collision
+    if (
+      ball.vx > 0 &&
+      ball.x + BALL_SIZE / 2 >= W - PADDLE_W - 10 &&
+      ball.y >= state.right.y &&
+      ball.y <= state.right.y + PADDLE_H
+    ) {
+      ball.vx = -Math.abs(ball.vx) * 1.05
+      ball.x = W - PADDLE_W - 10 - BALL_SIZE / 2
+      const hitPos = (ball.y - state.right.y) / PADDLE_H - 0.5
+      ball.vy += hitPos * 3
+    }
 
-  // Scoring
-  if (ball.x < 0) {
-    state.right.score++
-    checkWin() || resetBall()
-  } else if (ball.x > W) {
-    state.left.score++
-    checkWin() || resetBall()
+    // Scoring
+    if (ball.x < 0) {
+      state.right.score++
+      if (!checkWin()) resetBall()
+    } else if (ball.x > W) {
+      state.left.score++
+      if (!checkWin()) resetBall()
+    }
+  } else {
+    // Guest: move local paddle with same keys and send position to host
+    if (keys['w'] || keys['W']) state.right.y = Math.max(0, state.right.y - PADDLE_SPEED)
+    if (keys['s'] || keys['S']) state.right.y = Math.min(H - PADDLE_H, state.right.y + PADDLE_SPEED)
+    send({ t: 'input', y: state.right.y })
   }
 }
 
@@ -160,6 +245,20 @@ function checkWin () {
   return false
 }
 
+// ── Network sync (host broadcasts state at fixed rate) ────────────────────
+setInterval(() => {
+  if (role === 'host' && peer) {
+    send({
+      t: 'state',
+      left: state.left,
+      right: state.right,
+      ball: state.ball,
+      running: state.running,
+      over: state.over
+    })
+  }
+}, NET_TICK_MS)
+
 // ── Draw ──────────────────────────────────────────────────────────────────
 function draw () {
   ctx.clearRect(0, 0, W, H)
@@ -173,12 +272,17 @@ function draw () {
   ctx.stroke()
   ctx.setLineDash([])
 
-  // Paddles
-  ctx.fillStyle = '#fff'
+  // Paddles — highlight your own paddle in green
+  const leftColor = role === 'host' ? '#4caf50' : '#fff'
+  const rightColor = role === 'guest' ? '#4caf50' : '#fff'
+
+  ctx.fillStyle = leftColor
   ctx.fillRect(10, state.left.y, PADDLE_W, PADDLE_H)
+  ctx.fillStyle = rightColor
   ctx.fillRect(W - PADDLE_W - 10, state.right.y, PADDLE_W, PADDLE_H)
 
   // Ball
+  ctx.fillStyle = '#fff'
   ctx.beginPath()
   ctx.arc(state.ball.x, state.ball.y, BALL_SIZE, 0, Math.PI * 2)
   ctx.fill()
@@ -187,7 +291,7 @@ function draw () {
   scoreEl.textContent = `${state.left.score} : ${state.right.score}`
 }
 
-// ── Game loop (60 fps via requestAnimationFrame) ──────────────────────────
+// ── Game loop ─────────────────────────────────────────────────────────────
 function loop () {
   update()
   draw()
@@ -195,4 +299,4 @@ function loop () {
 }
 
 loop()
-console.log('Pear-Pong loaded')
+console.log('Pear-Pong loaded — waiting for peer...')

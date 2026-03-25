@@ -33,10 +33,20 @@ pear run -d .
 ```
 Both windows will auto-discover each other via Hyperswarm.
 
+## How It Works
+
+When two instances connect via Hyperswarm, roles are assigned deterministically (by comparing public keys):
+
+- **Host** (left paddle) — runs ball physics, collision detection, and scoring. Broadcasts the full game state ~60 times per second.
+- **Guest** (right paddle) — sends paddle position to the host. Receives and renders the authoritative state.
+
+This "host-authority" model is the simplest correct approach for real-time P2P games. It avoids conflicts at the cost of the guest seeing ~1 network round-trip of latency.
+
 ## Controls
-- **Left paddle:** W (up) / S (down)
-- **Right paddle:** ↑ / ↓
+- **Your paddle:** W (up) / S (down)
 - **Serve:** Space
+
+Your paddle is highlighted in green. Both players use the same keys.
 
 ## Tech Stack
 - [Pear Runtime](https://docs.pears.com/) — P2P desktop app platform
