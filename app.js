@@ -1,5 +1,8 @@
 /* global Pear */
 import Hyperswarm from 'hyperswarm'
+import Corestore from 'corestore'
+import Hypercore from 'hypercore'
+import b4a from 'b4a'
 import crypto from 'hypercore-id-encoding'
 
 // ── DOM refs ──────────────────────────────────────────────────────────────
@@ -34,6 +37,84 @@ const NET_TICK_MS = 16 // ~60 Hz network sync rate
 // ──────────────────────────────────────────────────────────────────────────
 let role = 'host' // default until a peer connects
 let peer = null
+
+// ── Leaderboard (Hypercore-backed) ───────────────────────────────────────
+// Each peer owns an append-only Hypercore log that stores match results.
+// When peers connect, they replicate their Corestores so both sides
+// can read each other's match history.  This means the leaderboard
+// persists across sessions and is shared without any server.
+// ──────────────────────────────────────────────────────────────────────────
+const store = new Corestore(Pear.config.storage)
+const localCore = store.get({ name: 'match-log' })
+await localCore.ready()
+
+const myId = b4a.toString(localCore.key, 'hex').slice(0, 8)
+const leaderboardEl = document.getElementById('leaderboard')
+
+// Track all cores we know about (ours + replicated peers)
+const knownCores = new Map() // hex-key -> Hypercore
+knownCores.set(b4a.toString(localCore.key, 'hex'), localCore)
+
+async function recordMatch (winnerId, loserId, winnerScore, loserScore) {
+  const entry = {
+    winner: winnerId,
+    loser: loserId,
+    winnerScore,
+    loserScore,
+    ts: Date.now()
+  }
+  await localCore.append(Buffer.from(JSON.stringify(entry)))
+  renderLeaderboard()
+}
+
+async function readAllMatches () {
+  const matches = []
+  for (const core of knownCores.values()) {
+    try {
+      const len = core.length
+      for (let i = 0; i < len; i++) {
+        const block = await core.get(i)
+        if (!block) continue
+        try {
+          matches.push(JSON.parse(b4a.toString(block)))
+        } catch { /* skip non-JSON blocks */ }
+      }
+    } catch { /* core might not be ready yet */ }
+  }
+  return matches
+}
+
+async function renderLeaderboard () {
+  const matches = await readAllMatches()
+  if (matches.length === 0) {
+    leaderboardEl.innerHTML = '<em>No matches yet</em>'
+    return
+  }
+
+  // Tally wins per player
+  const stats = {}
+  for (const m of matches) {
+    if (!stats[m.winner]) stats[m.winner] = { wins: 0, losses: 0 }
+    if (!stats[m.loser]) stats[m.loser] = { wins: 0, losses: 0 }
+    stats[m.winner].wins++
+    stats[m.loser].losses++
+  }
+
+  const rows = Object.entries(stats)
+    .sort((a, b) => b[1].wins - a[1].wins)
+    .map(([id, s], i) => {
+      const you = id === myId ? ' (you)' : ''
+      return `<tr><td>${i + 1}</td><td>${id}${you}</td><td>${s.wins}</td><td>${s.losses}</td></tr>`
+    })
+    .join('')
+
+  leaderboardEl.innerHTML = `
+    <table>
+      <tr><th>#</th><th>Player</th><th>W</th><th>L</th></tr>
+      ${rows}
+    </table>
+  `
+}
 
 // ── Game state ────────────────────────────────────────────────────────────
 const state = {
@@ -74,9 +155,22 @@ function send (obj) {
   }
 }
 
+let peerMatchId = null // short ID of the connected peer's match-log
+
 function onData (buf) {
   let msg
   try { msg = JSON.parse(buf.toString()) } catch { return }
+
+  // Exchange match-log keys so we can replicate leaderboard data
+  if (msg.t === 'match-key') {
+    peerMatchId = msg.id
+    const peerCore = store.get({ key: b4a.from(msg.key, 'hex') })
+    peerCore.ready().then(() => {
+      knownCores.set(msg.key, peerCore)
+      renderLeaderboard()
+    })
+    return
+  }
 
   if (role === 'host') {
     // Host receives guest input
@@ -99,13 +193,19 @@ function onData (buf) {
       state.ball = msg.ball
       state.running = msg.running
       state.over = msg.over
+
+      // Re-render leaderboard when game ends (guest side)
+      if (msg.over) renderLeaderboard()
     }
   }
 }
 
 // ── P2P connection via Hyperswarm ─────────────────────────────────────────
 const swarm = new Hyperswarm()
-Pear.teardown(() => swarm.destroy())
+Pear.teardown(() => {
+  swarm.destroy()
+  store.close()
+})
 
 const topic = crypto.decode('70656172706f6e67746573743130313030303030303030303030303030303030')
 swarm.join(topic, { client: true, server: true })
@@ -126,10 +226,12 @@ swarm.on('connection', (conn) => {
   const side = role === 'host' ? 'LEFT' : 'RIGHT'
   statusEl.innerText = `Connected to ${id} — you are ${side} paddle`
   statusEl.style.background = '#2e7d32'
-  controlsEl.textContent = role === 'host'
-    ? 'You: W / S  ·  Space: serve'
-    : 'You: W / S  ·  Space: serve'
+  controlsEl.textContent = 'You: W / S  ·  Space: serve'
 
+  // Replicate Corestores so both peers can read each other's match logs
+  store.replicate(conn)
+
+  // If the peer tells us about their match-log key, track it
   conn.on('data', onData)
 
   conn.on('close', () => {
@@ -236,10 +338,20 @@ function update () {
 
 function checkWin () {
   if (state.left.score >= WINNING_SCORE || state.right.score >= WINNING_SCORE) {
-    const winner = state.left.score >= WINNING_SCORE ? 'Left' : 'Right'
+    const leftWon = state.left.score >= WINNING_SCORE
+    const winner = leftWon ? 'Left' : 'Right'
     statusEl.innerText = `${winner} wins! Press Space to play again`
     state.running = false
     state.over = true
+
+    // Host records the match result to its Hypercore
+    if (role === 'host') {
+      const winnerId = leftWon ? myId : (peerMatchId || 'guest')
+      const loserId = leftWon ? (peerMatchId || 'guest') : myId
+      const ws = leftWon ? state.left.score : state.right.score
+      const ls = leftWon ? state.right.score : state.left.score
+      recordMatch(winnerId, loserId, ws, ls)
+    }
     return true
   }
   return false
@@ -299,4 +411,5 @@ function loop () {
 }
 
 loop()
+renderLeaderboard()
 console.log('Pear-Pong loaded — waiting for peer...')

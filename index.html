@@ -35,6 +35,29 @@
       font-size: 12px;
       color: #666;
     }
+    #leaderboard {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #aaa;
+      min-width: 300px;
+      text-align: center;
+    }
+    #leaderboard table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 4px;
+    }
+    #leaderboard th, #leaderboard td {
+      padding: 4px 12px;
+      text-align: center;
+    }
+    #leaderboard th {
+      color: #4caf50;
+      border-bottom: 1px solid #333;
+    }
+    #leaderboard tr:nth-child(even) {
+      background: #111;
+    }
   </style>
 </head>
 <body>
@@ -42,6 +65,7 @@
   <div id="score">0 : 0</div>
   <canvas id="game" width="800" height="400"></canvas>
   <div id="controls">Waiting for opponent...</div>
+  <div id="leaderboard"><em>No matches yet</em></div>
   <script type="module" src="./app.js"></script>
 </body>
 </html>
