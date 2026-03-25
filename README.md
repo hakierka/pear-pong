@@ -15,28 +15,39 @@ Pear Pong is a classic Pong game that runs entirely peer-to-peer using Holepunch
 ## Quick Start
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18+)
-- [Pear Runtime](https://docs.pears.com/) installed (`npx pear` to bootstrap)
+Both players need [Pear Runtime](https://docs.pears.com/) installed. The quickest way:
+```bash
+npx pear
+```
+Then follow the prompt to complete setup.
 
-### Run from pear:// link
+### Player 1 — start the game
 ```bash
 pear run pear://krx4hk66o69wt13cbythmw44oasyiny1tj4kkputhfaq1j95nh6o
 ```
+A window opens showing "Searching for opponent...". That's it — you're waiting for Player 2.
 
-### Run from source
+### Player 2 — join from any machine
+On a different computer (or a second terminal on the same machine), run the exact same command:
+```bash
+pear run pear://krx4hk66o69wt13cbythmw44oasyiny1tj4kkputhfaq1j95nh6o
+```
+Both players auto-discover each other via Hyperswarm — no IP addresses, no server, no room codes. Roles (left/right paddle) are assigned automatically.
+
+### Run from source (development)
 ```bash
 git clone https://github.com/hakierka/pear-pong.git
 cd pear-pong
 npm install
 pear run -d .
 ```
-
-### Connect a second player
-Open a second terminal and run the same command:
+For local testing with two instances, use `--tmp-store` for the second player:
 ```bash
-pear run -d .
+pear run -d --tmp-store .
 ```
-Both windows will auto-discover each other via Hyperswarm.
+
+### What if more than 2 people join?
+The game is strictly 1v1. Each instance accepts only one peer connection. If a third player tries to connect, they'll stay on "Searching for opponent..." until one of the current players disconnects.
 
 ## How It Works
 
