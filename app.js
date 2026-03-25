@@ -34,8 +34,9 @@ const NET_TICK_MS = 16 // ~60 Hz network sync rate
 //   guest -> host  : { t:'input', y: <number> }
 //   either         : { t:'serve' }  |  { t:'reset' }
 // ──────────────────────────────────────────────────────────────────────────
-let role = 'host' // default until a peer connects
+let role = 'host'
 let peer = null
+let isPlayer1 = true // Player 1 = left paddle, Player 2 = right paddle
 
 // ── Leaderboard (Hypercore-backed) ───────────────────────────────────────
 // Each peer has a local Hypercore append-only log to persist match results.
@@ -199,18 +200,20 @@ swarm.on('connection', (conn) => {
   if (peer) { conn.destroy(); return }
 
   peer = conn
-  const id = crypto.encode(conn.remotePublicKey).slice(0, 6)
-
-  // Role assignment: the peer whose public key is "smaller" hosts.
-  // This is deterministic — both sides compute the same result.
+  const peerKey = crypto.encode(conn.remotePublicKey)
   const myKey = crypto.encode(swarm.keyPair.publicKey)
-  const theirKey = crypto.encode(conn.remotePublicKey)
-  role = myKey < theirKey ? 'host' : 'guest'
 
-  const side = role === 'host' ? 'LEFT' : 'RIGHT'
-  statusEl.innerText = `Connected to ${id} — you are ${side} paddle`
-  statusEl.style.background = '#2e7d32'
-  controlsEl.textContent = 'You: W / S  ·  Space: serve'
+  // Role assignment: deterministic — both sides compute the same result
+  isPlayer1 = myKey < peerKey
+  role = isPlayer1 ? 'host' : 'guest'
+
+  statusEl.innerText = isPlayer1
+    ? '🕹️ You are PLAYER 1 (Left Side). Lead the way.'
+    : '🕹️ You are PLAYER 2 (Right Side). Ready to win?'
+  statusEl.style.background = '#1a3a1a'
+  controlsEl.textContent = '⌨️ W / S to move · Space to serve'
+
+  console.log(`[P2P] Holepunched to peer: ${peerKey.slice(0, 6)}...`)
 
   // Tell the peer our leaderboard ID
   send({ t: 'hello', id: myId })
@@ -220,9 +223,10 @@ swarm.on('connection', (conn) => {
   conn.on('close', () => {
     peer = null
     role = 'host'
-    statusEl.innerText = 'Peer disconnected — waiting for player...'
-    statusEl.style.background = '#222'
-    controlsEl.textContent = 'Waiting for opponent...'
+    isPlayer1 = true
+    statusEl.innerText = '😢 Opponent left. Waiting for a new challenger...'
+    statusEl.style.background = ''
+    controlsEl.textContent = ''
     resetGame()
   })
 
@@ -236,7 +240,7 @@ function serve () {
   const dir = Math.random() < 0.5 ? 1 : -1
   state.ball.vx = dir * BALL_SPEED_INIT * Math.cos(angle)
   state.ball.vy = BALL_SPEED_INIT * Math.sin(angle)
-  statusEl.innerText = 'Game on!'
+  statusEl.innerText = '🏓 Game on! May the best paddle win.'
 }
 
 // ── Reset ─────────────────────────────────────────────────────────────────
@@ -246,7 +250,7 @@ function resetBall () {
   state.ball.vx = 0
   state.ball.vy = 0
   state.running = false
-  statusEl.innerText = peer ? 'Press Space to serve' : 'Waiting for player...'
+  statusEl.innerText = peer ? '🎯 Press Space to serve' : '👀 Looking for an opponent...'
 }
 
 function resetGame () {
@@ -322,8 +326,10 @@ function update () {
 function checkWin () {
   if (state.left.score >= WINNING_SCORE || state.right.score >= WINNING_SCORE) {
     const leftWon = state.left.score >= WINNING_SCORE
-    const winner = leftWon ? 'Left' : 'Right'
-    statusEl.innerText = `${winner} wins! Press Space to play again`
+    const youWon = (leftWon && isPlayer1) || (!leftWon && !isPlayer1)
+    statusEl.innerText = youWon
+      ? '🎉 You win! Press Space for a rematch'
+      : '💀 You lost. Press Space for revenge'
     state.running = false
     state.over = true
 
@@ -401,4 +407,4 @@ function loop () {
 
 loop()
 renderLeaderboard()
-console.log('Pear-Pong loaded — waiting for peer...')
+console.log('🍐 Pear-Pong loaded — looking for opponents on the swarm...')
