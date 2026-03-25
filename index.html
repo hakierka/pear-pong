@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>P2P Battle-Pong</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #fff;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    #status {
+      margin-bottom: 12px;
+      padding: 8px 16px;
+      border-radius: 4px;
+      background: #222;
+      font-size: 14px;
+    }
+    #score {
+      font-size: 28px;
+      margin-bottom: 8px;
+      letter-spacing: 8px;
+    }
+    canvas {
+      border: 2px solid #444;
+      background: #000;
+    }
+    #controls {
+      margin-top: 12px;
+      font-size: 12px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Local mode — press Space to start</div>
+  <div id="score">0 : 0</div>
+  <canvas id="game" width="800" height="400"></canvas>
+  <div id="controls">Left paddle: W / S &nbsp;&nbsp; Right paddle: ↑ / ↓ &nbsp;&nbsp; Space: serve</div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
