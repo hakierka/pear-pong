@@ -18,7 +18,12 @@ Pear Pong is a classic Pong game that runs entirely peer-to-peer using Holepunch
 - [Node.js](https://nodejs.org/) (v18+)
 - [Pear Runtime](https://docs.pears.com/) installed (`npx pear` to bootstrap)
 
-### Run locally
+### Run from pear:// link
+```bash
+pear run pear://krx4hk66o69wt13cbythmw44oasyiny1tj4kkputhfaq1j95nh6o
+```
+
+### Run from source
 ```bash
 git clone https://github.com/hakierka/pear-pong.git
 cd pear-pong
