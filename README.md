@@ -2,6 +2,8 @@
 
 A peer-to-peer Pong game built on [Pear Runtime](https://docs.pears.com/) — no servers, no APIs, just two players connected directly over the P2P network.
 
+![Pear Pong](images/pearpongUI.png)
+
 ## What is this?
 
 Pear Pong is a classic Pong game that runs entirely peer-to-peer using Holepunch's Pear platform. Players discover each other via [Hyperswarm](https://docs.pears.com/building-blocks/hyperswarm), exchange game state directly over encrypted connections, and persist match history using [Hypercore](https://docs.pears.com/building-blocks/hypercore) append-only logs.
