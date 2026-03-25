@@ -6,7 +6,7 @@
     "pre": "pear-electron/pre",
     "gui": {
       "width": 850,
-      "height": 500
+      "height": 650
     }
   },
   "dependencies": {
